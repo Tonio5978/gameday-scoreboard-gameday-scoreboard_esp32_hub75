@@ -2,14 +2,16 @@
 # and has shown its connect hint for a while; the boot button brings the
 # full address back.
 #
-# Four states, driven by the real WiFi state every half second. Each is a
+# Five states, driven by the real WiFi state every half second. Each is a
 # title plus up to four lines: small, big, small, small. boot_refresh tests
-# them in this order: connected, wifi lost, setup, connecting.
+# them in this order: connected, waiting, wifi lost, setup, connecting.
 #
-# Three of them carry a QR code for https://gamedayscoreboard.app/setup, a
-# universal link: the iPhone Camera opens the Game Day app when it is
-# installed and the setup web page when it is not. On a 128 px chain the
-# code sits on the left half and the lines move to the right half, so
+# Three of them carry a QR code for https://app.gameday-scoreboard.com/setup,
+# an app link: the phone opens the Game Day app when it is installed and
+# the setup web page when it is not. Keep it at 42 bytes or less (it is
+# 40): LVGL encodes at error correction M, so 42 bytes is the most that
+# fits QR version 3, the largest that draws 2 px a module in 64 px. On a
+# 128 px chain the code sits on the left half and the lines move to the right half, so
 # nothing has to take turns with it. On a single 64 px panel there is no
 # room for both, so the code takes turns with the lines. See boot_qr_box
 # below for the sizing and boot_qr_cycle for the timing.
@@ -21,10 +23,27 @@
 #               128: QR + Wi-Fi / lost / open app
 #   setup       64:  SETUP / Game Day / app (5 s), QR (8 s), then once the
 #                    hotspot is actually up Join WiFi / Game Day /
-#                    Scoreboard (5 s)
+#                    2f6a70 (5 s), the hotspot's own name
 #               128: QR + SETUP / Game Day / app (13 s), then the hotspot
 #                    lines (5 s) once it is up
 #   connecting  Connecting to / <network name>, full width, no QR
+#   waiting     64:  Waiting for / <network name> (5 s), Just had a /
+#                    power cut? / Routers take / a few min (5 s)
+#               128: Waiting for / <network name> / Just had a power cut? /
+#                    Routers take a few min, full width, no QR
+#   sign-in     64:  Wi-Fi needs / sign-in / use home or / a hotspot (5 s),
+#                    QR (8 s)
+#               128: QR + the same lines
+#
+# "sign-in" is a connected panel on a Wi-Fi that holds everything behind a
+# sign-in page (a bar, hotel or dorm; components/gameday/captive.h). It comes
+# up over the board when the gameday component sends "captive" and goes on
+# "captive_clear", once ESPN answers (gameday-common.yaml). The boot button's
+# address still takes over while it is held.
+#
+# "waiting" is a boot that has not reached its saved network 30 s in and may
+# be back from a power cut, when the router takes minutes to start. It holds
+# until 3 minutes in, then gives way to "wifi lost".
 #
 # "wifi lost" means the panel has a saved network and is not on it, either
 # because it dropped or because it never came up this boot. It sits above the
@@ -33,15 +52,20 @@
 # leads in setup; the hotspot keeps a turn because it is the only way in
 # without an iPhone.
 #
-# Connected: a fresh panel keeps this up for 45 seconds, or until a team is
-# picked. The address turn is what "Show address at boot" on the device page
-# controls, since it is how someone who set the panel up through the
-# hotspot finds it again; with the setting off a fresh panel shows only the
-# QR. A panel that already has a team shows just the address for 3 seconds
-# at boot (full width, no QR, on a chain too), or nothing with the setting
-# off. A boot button hold always shows the full address and IP, full
+# Connected: every panel shows the QR for the app once it joins Wi-Fi,
+# with or without a team. A fresh panel keeps it up for 45 seconds, or
+# until a team is picked. A panel that already has a team gets one run of
+# turns, 18 seconds, and then its board. The address turn is what "Show
+# address at boot" on the device page controls, since it is how someone who
+# set the panel up through the hotspot finds it again; with the setting off
+# a fresh panel shows only the QR, and a panel with a team skips the screen
+# and goes straight to its board. Coming back to the same network after a
+# drop is not a new join and shows nothing: the Wi-Fi lost screen already
+# carried the QR. A boot button hold always shows the full address and IP, full
 # width, with no QR, for 20 seconds. Off Wi-Fi the overlay never hides, so
 # the button cannot blank a panel that is in setup or has lost its network.
+# A panel with no team picked brings the QR back over the board for 13 s
+# every 3 minutes (boot_app_qr_turn) until one is.
 #
 # Nothing here should scroll. Lines are kept to 12 characters (60 px of
 # Spleen 5x8) on a 64 px column, the hostname is split at its dash to fit,
@@ -57,11 +81,11 @@
 # change asks again (board_pending in gameday-common.yaml), so the new team's
 # scores load behind this screen instead of on a half-empty board.
 #
-# esp32_improv (Bluetooth setup, how the Game Day app provisions a panel)
+# improv_ble (Bluetooth setup, how the Game Day app provisions a panel)
 # also draws the setup or lost lines when it starts advertising, so they are
 # up before the next poll, and JOINING / <network> once the app hands over
 # credentials, which both off-Wi-Fi states keep up until the panel connects.
-# See the esp32_improv block below.
+# See the improv_ble block below.
 
 globals:
   - id: boot_ip_shown_ms
@@ -79,7 +103,7 @@ globals:
   # millis() at the last moment the panel was seen on its saved network this
   # boot, 0 if it has never been on it. Read by boot_refresh and boot_hide to
   # work out whether Wi-Fi is lost; nothing latches that as a flag, because a
-  # flag does not survive the ten minute offline restart in gameday-common.yaml
+  # flag does not survive the offline restart in gameday-common.yaml
   # and never gets set at all on a boot that never connects.
   - id: boot_last_connected_ms
     type: uint32_t
@@ -103,6 +127,16 @@ globals:
   - id: boot_had_creds
     type: bool
     initial_value: 'false'
+  # True when this boot could be the panel coming back from a power cut, so
+  # the router may still be starting (see the waiting state in boot_refresh).
+  # A software restart is not one: the offline restart in gameday-common.yaml,
+  # an update, the Reboot button. Those panels go to Wi-Fi lost at the usual
+  # 30 s, since the owner may already have seen it before the restart. A
+  # crash or watchdog restart keeps the grace: it can't tell a router outage
+  # from a healthy one, and the wait costs nothing.
+  - id: boot_power_cut_grace
+    type: bool
+    initial_value: 'esp_reset_reason() != ESP_RST_SW'
   # The turn boot_qr_cycle picked: 0 the state's own text, 1 the QR code,
   # 2 the hotspot text. boot_refresh reads it to choose the lines.
   - id: boot_qr_frame
@@ -118,6 +152,20 @@ globals:
   - id: boot_hold_since_ms
     type: uint32_t
     initial_value: '0'
+  # True while boot_app_qr_turn has the overlay up.
+  - id: boot_app_qr_on
+    type: bool
+    initial_value: 'false'
+  # The network the panel last joined this boot, empty before the first
+  # join. Coming back to the same one after a drop is not a new join.
+  - id: boot_joined_ssid
+    type: std::string
+    initial_value: ''
+  # Whether this join shows the app's QR code (see boot_refresh). Decided
+  # once per join, when boot_ip_shown_ms is still 0.
+  - id: boot_join_qr
+    type: bool
+    initial_value: 'false'
 
 script:
   # Positions and fonts. side true puts the lines in the right half of a
@@ -141,7 +189,7 @@ script:
           lv_obj_set_width(id(boot_title), cw);
           lv_obj_set_width(id(boot_rule), cw - 8);
           lv_obj_set_width(id(boot_bar), cw - 16);
-          lv_obj_set_pos(id(boot_bar), x0 + 8, wide ? 60 : 59);
+          lv_obj_set_pos(id(boot_bar), x0 + 8, wide ? 61 : 59);
           if (wide) {
             lv_obj_set_style_text_font(id(boot_title), id(spleen_16), 0);
             lv_obj_set_pos(id(boot_title), x0, 2);
@@ -193,7 +241,9 @@ script:
       busy: bool
     then:
       - lambda: |-
-          auto put = [](lv_obj_t *l, const std::string &t) {
+          auto put = [](lv_obj_t *l, const std::string &text) {
+            // A network name can hold characters the fonts lack (backlog #144).
+            const std::string t = gameday::panel_text(text);
             const lv_font_t *font = lv_obj_get_style_text_font(l, LV_PART_MAIN);
             lv_point_t sz;
             lv_text_get_size(&sz, t.c_str(), font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
@@ -214,9 +264,10 @@ script:
           else lv_obj_add_flag(id(boot_bar), LV_OBJ_FLAG_HIDDEN);
 
   # The timing for states that take turns. Sets boot_qr_frame: 0 for the
-  # first 5 s, 1 for the next 8 s, then 2 for 5 s when extra is true, round
-  # and round. boot_refresh decides what each frame shows. owner says whose
-  # run it is (1 connected, 2 wifi lost, 3 setup, 0 none): a new owner, or
+  # first 5 s, 1 for the next 8 s, then 2 for 5 s when extra is true, and for
+  # owner 4 a last 5 s as 3, round and round. boot_refresh decides what each
+  # frame shows. owner says whose run it is (1 connected, 2 wifi lost, 3
+  # setup, 4 setup after "Reset Wi-Fi", 5 sign-in, 0 none): a new owner, or
   # the same one gaining or losing its extra turn, starts again at frame 0,
   # so a run never opens partway through. 0 stops the turns.
   - id: boot_qr_cycle
@@ -225,7 +276,7 @@ script:
       extra: bool
     then:
       - lambda: |-
-          static const uint32_t TEXT_MS = 5000, QR_MS = 8000, EXTRA_MS = 5000;
+          static const uint32_t TEXT_MS = 5000, QR_MS = 8000, EXTRA_MS = 5000, UNPLUG_MS = 5000;
           int frame = 0;
           const int key = owner == 0 ? 0 : owner * 2 + (extra ? 1 : 0);
           if (key == 0) {
@@ -233,9 +284,10 @@ script:
           } else {
             if (key != id(boot_qr_key) || id(boot_qr_since_ms) == 0)
               id(boot_qr_since_ms) = millis() == 0 ? 1 : millis();
-            const uint32_t period = TEXT_MS + QR_MS + (extra ? EXTRA_MS : 0);
+            const uint32_t extra_ms = extra ? EXTRA_MS : 0;
+            const uint32_t period = TEXT_MS + QR_MS + extra_ms + (owner == 4 ? UNPLUG_MS : 0);
             const uint32_t t = (millis() - id(boot_qr_since_ms)) % period;
-            frame = t < TEXT_MS ? 0 : t < TEXT_MS + QR_MS ? 1 : 2;
+            frame = t < TEXT_MS ? 0 : t < TEXT_MS + QR_MS ? 1 : t < TEXT_MS + QR_MS + extra_ms ? 2 : 3;
           }
           id(boot_qr_key) = key;
           id(boot_qr_frame) = frame;
@@ -247,34 +299,56 @@ script:
       - lambda: |-
           auto *w = wifi::global_wifi_component;
           if (w == nullptr) return;
+          // The boot button's countdown has the screen (boot_hold_tick).
+          if (id(boot_hold_stage) >= 2) return;
           // The app is mid-handover: no QR and no turns, just JOINING.
           const bool provisioning =
-              esp32_improv::global_improv_component != nullptr &&
-              esp32_improv::global_improv_component->get_improv_state() ==
+              improv_ble::global_improv_component != nullptr &&
+              improv_ble::global_improv_component->get_improv_state() ==
                   improv::STATE_PROVISIONING;
           // Lost means: there is a real saved network and the panel is not on
           // it. Derived from the live Wi-Fi state every time rather than
-          // latched, so it is still right after the ten minute offline restart
+          // latched, so it is still right after the offline restart
           // and on a cold boot with the router already down.
           //
           // Two cases, deliberately different. Connected at some point this
           // boot and not now is a drop: say so immediately, the owner is
           // watching a board that just stopped updating. Never connected this
           // boot could just be a panel still coming up, so wait out a grace
-          // period first. Association normally takes a few seconds, 30 leaves
-          // room for a scan and a retry without ever flashing the alarm on a
-          // healthy boot, and it is a full minute short of the 90s fallback AP
-          // so the message is up long before the hotspot text could appear.
+          // period first. Association normally takes a few seconds, and 30
+          // leaves room for a scan and a retry without ever flashing the alarm
+          // on a healthy boot.
+          //
+          // After a power cut the panel is up in seconds and the router takes
+          // minutes, so a boot that may be one (boot_power_cut_grace) says it
+          // is waiting for the network until 3 minutes in, and only then that
+          // Wi-Fi is lost. Bluetooth and the hotspot still start on time.
           //
           // The blank-SSID half of have_creds is what keeps a panel out of
-          // here after "Reset Wi-Fi": that button saves an empty network, which
-          // still counts as has_sta(), and that panel is in setup, not in
+          // here after "Reset Wi-Fi": that panel boots with an empty network in
+          // memory, which still counts as has_sta(), and is in setup, not in
           // trouble. boot_had_creds carries a real network through a failed
           // handover from the app, which clears the one in memory.
           const bool have_creds = w->has_sta() && !w->get_sta().get_ssid().empty();
           if (have_creds) id(boot_had_creds) = true;
-          const bool lost = id(boot_had_creds) && (id(boot_last_connected_ms) != 0 || millis() > 30000);
+          static const uint32_t GRACE_MS = 30000, ROUTER_MS = 3 * 60 * 1000;
+          const bool never = id(boot_last_connected_ms) == 0;
+          const bool waiting = id(boot_had_creds) && never && id(boot_power_cut_grace) &&
+                               millis() > GRACE_MS && millis() <= ROUTER_MS;
+          const bool lost = id(boot_had_creds) && !waiting && (!never || millis() > GRACE_MS);
           const bool wide = lv_disp_get_hor_res(lv_disp_get_default()) >= 128;
+          // The network it is trying to join. wifi_ssid_to() stays blank until
+          // the panel is on one, so name the saved network that worked last,
+          // which is the one it tries first.
+          auto network = [w]() -> std::string {
+            char buf[wifi::SSID_BUFFER_SIZE];
+            std::string name = w->wifi_ssid_to(buf);
+            if (name.empty()) {
+              const auto nets = id(gd_networks).list();
+              name = nets.empty() ? w->get_sta().get_ssid().str() : nets.front().ssid;
+            }
+            return name;
+          };
           // The address as up to two lines of 12 characters, split after the
           // dash in gameday-2f6a70.local. A name that will not split that way
           // stays on one line and scrolls, slowly.
@@ -288,6 +362,19 @@ script:
             }
           }
           if (w->is_connected()) {
+            if (id(boot_ip_shown_ms) == 0) {
+              // A new join: every boot, and any network the panel was not on
+              // before this boot (the app handing over a new router's
+              // network mid-outage). Coming back to the same network after a
+              // drop is not one; the Wi-Fi lost screen already showed the QR.
+              char buf[wifi::SSID_BUFFER_SIZE];
+              const std::string ssid = w->wifi_ssid_to(buf);
+              const bool same = !id(boot_joined_ssid).empty() && ssid == id(boot_joined_ssid);
+              id(boot_joined_ssid) = ssid;
+              id(boot_join_qr) = !id(gameday_ctl).setup_done() || (!same && id(gameday_ctl).show_boot_address());
+              ESP_LOGI("boot", "On Wi-Fi (%s): %s", same ? "same network" : "new join",
+                       id(boot_join_qr) ? "showing the app's QR code" : "straight to the board");
+            }
             id(boot_last_connected_ms) = millis() == 0 ? 1 : millis();
             // boot_show_address keeps the button's address up for 20 s, and
             // boot_check's twice a second polls must not swap it back.
@@ -311,39 +398,46 @@ script:
                 id(boot_set_lines).execute("Open", h1, ip, "pick a team", false);
               else
                 id(boot_set_lines).execute(h1, h2, ip, "pick a team", false);
+            } else if (id(gameday_ctl).captive()) {
+              // On Wi-Fi, but it holds everything behind a sign-in page
+              // (components/gameday/captive.h). The panel can't sign in, so
+              // send the owner to another network: the QR opens the app,
+              // which hands the panel a home network or a phone hotspot.
+              id(boot_qr_cycle).execute(5, false);
+              id(boot_view).execute(wide, wide || id(boot_qr_frame) == 1);
+              id(boot_set_lines).execute("Wi-Fi needs", "sign-in", "use home or", "a hotspot", false);
             } else if (id(boot_hold_since_ms) != 0) {
               id(boot_hold_view).execute();
             } else {
-              // Normal connect. A fresh panel shows the QR for the app, with
-              // the address taking a turn when "Show address at boot" is on.
-              // A panel that already has a team only gets here with that
-              // setting on (see the hide timers below) and shows just the
-              // address, no QR: it has been set up, it needs no app link.
-              const bool fresh = !id(gameday_ctl).setup_done();
-              bool addr = true;
-              if (fresh) {
+              // Normal connect: the QR for the app, with the address taking a
+              // turn when "Show address at boot" is on. Every panel, with or
+              // without a team: whoever just put it on Wi-Fi is the person
+              // who needs the app next. A panel with a team and the setting
+              // off, or back on its network after a drop, hides straight
+              // away (see the hide timers below) and only flashes the hold
+              // view here. boot_app_qr_turn borrows the same view.
+              if (id(boot_join_qr) || id(boot_app_qr_on)) {
                 id(boot_qr_cycle).execute(1, id(gameday_ctl).show_boot_address());
-                addr = id(boot_qr_frame) == 2;
+                const bool addr = id(boot_qr_frame) == 2;
+                id(boot_view).execute(wide, wide || !addr);
+                if (addr)
+                  id(boot_set_lines).execute("Open", h1, h2, "", false);
+                else if (wide)
+                  id(boot_set_lines).execute("Scan for", "Game Day", "app", "", false);
+                else
+                  id(boot_set_lines).execute("", "", "", "", false);
               } else {
-                id(boot_qr_cycle).execute(0, false);
+                id(boot_hold_view).execute();
               }
-              const bool side = wide && fresh;
-              id(boot_view).execute(side, side || !addr);
-              if (addr && wide && !side)
-                id(boot_set_lines).execute("Open", host, "", "", false);
-              else if (addr)
-                id(boot_set_lines).execute("Open", h1, h2, "", false);
-              else if (wide)
-                id(boot_set_lines).execute("Scan for", "Game Day", "app", "", false);
-              else
-                id(boot_set_lines).execute("", "", "", "", false);
             }
             if (id(boot_ip_shown_ms) == 0) {
               id(boot_ip_shown_ms) = millis() == 0 ? 1 : millis();
+              // A panel with a team gets one run of boot_qr_cycle's turns:
+              // 13 s of QR, then the address's 5 s.
               if (!id(gameday_ctl).setup_done())
                 id(boot_hide_later).execute(45000);
-              else if (id(gameday_ctl).show_boot_address())
-                id(boot_hide_later).execute(3000);
+              else if (id(boot_join_qr))
+                id(boot_hide_later).execute(18000);
               else
                 id(boot_hide).execute();
             }
@@ -352,6 +446,23 @@ script:
             if (id(boot_hold_since_ms) != 0 && !via_button && !id(boot_show_address).is_running() &&
                 !id(gameday_ctl).boot_hold(id(boot_hold_since_ms)))
               id(boot_hide).execute();
+          } else if (waiting) {
+            // Maybe a power cut, router still starting. Ahead of the setup
+            // branch for the same reason as lost below: the hotspot comes up
+            // inside these 3 minutes. No QR: nothing needs the app yet. On a
+            // 64 px panel the network name and the power cut take turns.
+            id(boot_qr_cycle).execute(0, false);
+            id(boot_view).execute(false, false);
+            if (provisioning) {
+              const std::string joining = w->get_sta().get_ssid().str();
+              id(boot_set_lines).execute("JOINING", joining.empty() ? std::string("Wi-Fi") : joining, "", "", true);
+            } else if (wide)
+              id(boot_set_lines).execute("Waiting for", network(), "Just had a power cut?",
+                                         "Routers take a few min", true);
+            else if ((millis() - GRACE_MS) % 10000 < 5000)
+              id(boot_set_lines).execute("Waiting for", network(), "", "", true);
+            else
+              id(boot_set_lines).execute("Just had a", "power cut?", "Routers take", "a few min", true);
           } else if (lost) {
             // Tested before the setup branch below on purpose. The fallback AP
             // starts 90 seconds into any outage, so that branch would otherwise
@@ -366,8 +477,8 @@ script:
             id(boot_view).execute(wide && !provisioning,
                                   !provisioning && (wide || id(boot_qr_frame) == 1));
             if (provisioning) {
-              const auto joining = w->get_sta().get_ssid();
-              id(boot_set_lines).execute("JOINING", joining.empty() ? std::string("Wi-Fi") : joining.str(), "", "", true);
+              const std::string joining = w->get_sta().get_ssid().str();
+              id(boot_set_lines).execute("JOINING", joining.empty() ? std::string("Wi-Fi") : joining, "", "", true);
             } else
               id(boot_set_lines).execute("Wi-Fi", "lost", "open app", "", true);
           } else if (!w->has_sta() || w->is_ap_active()) {
@@ -375,23 +486,28 @@ script:
             // Lead with the app, then the hotspot for anyone without an
             // iPhone. The hotspot turn waits until the AP is really up, so it
             // never points at a network that is not there yet. On a 128 px
-            // chain the QR stays up throughout; on 64 it is frame 1.
-            id(boot_qr_cycle).execute(provisioning ? 0 : 3, w->is_ap_active());
+            // chain the QR stays up throughout; on 64 it is frame 1. After
+            // "Reset Wi-Fi" (owner 4) a last turn says that unplugging the
+            // panel takes it back to the networks it already knows.
+            id(boot_qr_cycle).execute(provisioning ? 0 : id(gd_networks).in_setup() ? 4 : 3, w->is_ap_active());
             const int frame = id(boot_qr_frame);
             id(boot_view).execute(wide && !provisioning,
                                   !provisioning && (wide || frame == 1));
             if (provisioning) {
-              const auto joining = w->get_sta().get_ssid();
-              id(boot_set_lines).execute("JOINING", joining.empty() ? std::string("Wi-Fi") : joining.str(), "", "", true);
-            } else if (frame == 2)
-              id(boot_set_lines).execute("Join WiFi", "Game Day", "Scoreboard", "", true);
-            else
+              const std::string joining = w->get_sta().get_ssid().str();
+              id(boot_set_lines).execute("JOINING", joining.empty() ? std::string("Wi-Fi") : joining, "", "", true);
+            } else if (frame == 3) {
+              id(boot_set_lines).execute("Unplug it to", "rejoin", "saved Wi-Fi", "", true);
+            } else if (frame == 2) {
+              // The hotspot is "Game Day <suffix>", named in on_boot.
+              const std::string &name = App.get_name();
+              id(boot_set_lines).execute("Join WiFi", "Game Day", name.substr(name.rfind('-') + 1), "", true);
+            } else
               id(boot_set_lines).execute("SETUP", "Game Day", "app", "", true);
           } else {
             id(boot_qr_cycle).execute(0, false);
             id(boot_view).execute(false, false);
-            char ssid[wifi::SSID_BUFFER_SIZE];
-            id(boot_set_lines).execute(wide ? "Connecting to" : "Connecting", w->wifi_ssid_to(ssid), "", "", true);
+            id(boot_set_lines).execute(wide ? "Connecting to" : "Connecting", network(), "", "", true);
           }
 
   # Keep the address up for a while after connecting, then clear the overlay
@@ -418,54 +534,90 @@ script:
 
   - id: boot_hide
     then:
+      # The boot button's countdown owns the overlay (boot_hold_tick):
+      # nothing hides it or paints over it until the button is let go, and
+      # the release ends in boot_show_address, which asks for this again.
       - if:
           condition:
-            lambda: |-
-              // Not on Wi-Fi: the overlay is the only thing telling the owner
-              // what to do, whether the panel lost its network or was never
-              // set up. Never hide it out from under them, whatever asked
-              // for the hide (the boot button's 20 s timer, for one, which
-              // used to blank a panel in setup until a restart).
-              auto *w = wifi::global_wifi_component;
-              return w != nullptr && !w->is_connected();
+            lambda: 'return id(boot_hold_stage) < 2;'
           then:
-            # Re-arm the hide for when Wi-Fi comes back. A drop shorter than
-            # boot_wifi_lost_later's wait never resets this, so the overlay
-            # would otherwise stay over the scoreboard.
-            - lambda: 'id(boot_ip_shown_ms) = 0;'
-            - component.resume: boot_check
-            - component.resume: boot_anim
-            - script.execute:
-                id: boot_refresh
-                via_button: false
-          else:
             - if:
                 condition:
                   lambda: |-
-                    // On Wi-Fi, but the first scoreboard is not ready: hold
-                    // until it is, or until the cap runs out, rather than
-                    // uncover an empty board.
-                    if (id(boot_hold_since_ms) == 0 && !id(gameday_ctl).board_ready())
-                      id(boot_hold_since_ms) = millis() == 0 ? 1 : millis();
-                    return id(gameday_ctl).boot_hold(id(boot_hold_since_ms));
+                    // Not on Wi-Fi: the overlay is the only thing telling the owner
+                    // what to do, whether the panel lost its network or was never
+                    // set up. Never hide it out from under them, whatever asked
+                    // for the hide (the boot button's 20 s timer, for one, which
+                    // used to blank a panel in setup until a restart).
+                    auto *w = wifi::global_wifi_component;
+                    return w != nullptr && !w->is_connected();
                 then:
+                  # Re-arm the hide for when Wi-Fi comes back. A drop shorter than
+                  # boot_wifi_lost_later's wait never resets this, so the overlay
+                  # would otherwise stay over the scoreboard.
+                  - lambda: 'id(boot_ip_shown_ms) = 0;'
                   - component.resume: boot_check
                   - component.resume: boot_anim
-                  - script.execute: boot_hold_view
-                  - lvgl.obj.update:
-                      id: boot_overlay
-                      hidden: false
-                else:
-                  - lambda: 'id(boot_hold_since_ms) = 0;'
-                  - component.suspend: boot_check
-                  - component.suspend: boot_anim
                   - script.execute:
-                      id: boot_qr_cycle
-                      owner: 0
-                      extra: false
-                  - lvgl.obj.update:
-                      id: boot_overlay
-                      hidden: true
+                      id: boot_refresh
+                      via_button: false
+                else:
+                  - if:
+                      condition:
+                        lambda: |-
+                          // On Wi-Fi that wants a sign-in, the overlay is what says
+                          // so (boot_refresh). It goes when that clears: the
+                          // captive_clear action in gameday-common.yaml asks again.
+                          return id(gameday_ctl).captive() && !id(qc_active);
+                      then:
+                        # A hold for the first scoreboard that started before the
+                        # sign-in state ends here: boot_refresh would otherwise ask
+                        # for this hide again every tick once the hold ran out, and
+                        # captive_clear starts a fresh one.
+                        - lambda: 'id(boot_hold_since_ms) = 0;'
+                        - component.resume: boot_check
+                        - component.resume: boot_anim
+                        # Paint now when the overlay was hidden, but not from inside
+                        # boot_refresh, which can be what called this.
+                        - if:
+                            condition:
+                              not:
+                                script.is_running: boot_refresh
+                            then:
+                              - script.execute:
+                                  id: boot_refresh
+                                  via_button: false
+                        - lvgl.obj.update:
+                            id: boot_overlay
+                            hidden: false
+                      else:
+                        - if:
+                            condition:
+                              lambda: |-
+                                // On Wi-Fi, but the first scoreboard is not ready: hold
+                                // until it is, or until the cap runs out, rather than
+                                // uncover an empty board.
+                                if (id(boot_hold_since_ms) == 0 && !id(gameday_ctl).board_ready())
+                                  id(boot_hold_since_ms) = millis() == 0 ? 1 : millis();
+                                return id(gameday_ctl).boot_hold(id(boot_hold_since_ms));
+                            then:
+                              - component.resume: boot_check
+                              - component.resume: boot_anim
+                              - script.execute: boot_hold_view
+                              - lvgl.obj.update:
+                                  id: boot_overlay
+                                  hidden: false
+                            else:
+                              - lambda: 'id(boot_hold_since_ms) = 0;'
+                              - component.suspend: boot_check
+                              - component.suspend: boot_anim
+                              - script.execute:
+                                  id: boot_qr_cycle
+                                  owner: 0
+                                  extra: false
+                              - lvgl.obj.update:
+                                  id: boot_overlay
+                                  hidden: true
 
   # Boot button: bring the address back for 20 seconds
   - id: boot_show_address
@@ -480,52 +632,83 @@ script:
       - delay: 20s
       - script.execute: boot_hide
 
-  # Boot button held down: stage 1 shows the address, stage 2 warns that a
-  # reset is coming with a bar that fills from 5s to 10s, stage 3 resets.
-  # Timed from the press so the customer sees the warning before anything
-  # is erased.
+  # Boot button held down, timed from the press. Nothing is erased while the
+  # button is down: the hold picks what happens and letting go does it
+  # (on_release below), so the owner reads the screen before anything is
+  # gone and can still back out.
+  #   1.5 s  stage 1: the address, as before
+  #   5 s    stage 2: Keep holding / Wi-Fi reset / in 5s, the bar filling
+  #   10 s   stage 3: Release to / reset Wi-Fi / Hold 10s to / erase all
+  #   20 s   stage 4: Release to / erase all / Hold 10s to / cancel
+  #   30 s   stage 5: Release to / cancel
+  # Letting go in stage 2 or 5 goes back to the address and resets nothing.
+  # Stage 6 is a reset on its way, until the restart.
   - id: boot_hold_tick
     then:
       - lambda: |-
-          if (id(boot_button_press_ms) == 0) return;
+          if (id(boot_button_press_ms) == 0 || id(boot_hold_stage) == 6) return;
           const uint32_t held = millis() - id(boot_button_press_ms);
-          if (held >= 10000) {
-            if (id(boot_hold_stage) == 3) return;
-            id(boot_hold_stage) = 3;
-            id(boot_set_lines).execute("Wi-Fi reset", "restarting", "", "", false);
-            id(boot_button_press_ms) = 0;
-            id(reset_wifi).press();
+          if (held < 5000) {
+            if (held >= 1500 && id(boot_hold_stage) < 1) {
+              id(boot_hold_stage) = 1;
+              // A panel switched off with a click would show none of this.
+              if (!id(power).state) id(power).turn_on();
+              id(boot_show_address).execute();
+            }
             return;
           }
-          if (held >= 5000) {
-            if (id(boot_hold_stage) != 2) {
-              id(boot_hold_stage) = 2;
-              // component.suspend maps to stop_poller() on a PollingComponent;
-              // there is no suspend() method to call from a lambda.
-              id(boot_anim).stop_poller();
-              // boot_check repaints the overlay twice a second. On a panel
-              // whose overlay is still up (first boot, or the 45s setup hint)
-              // it would overwrite this warning as fast as we draw it. It is
-              // not resumed on release: boot_show_address ends in boot_hide,
-              // which suspends it anyway, so this is where it would land. The
-              // exception is an outage, where boot_hide resumes it instead of
-              // hiding, which is what keeps the Wi-Fi lost lines coming back.
-              id(boot_check).stop_poller();
-              // The QR would cover the warning, and with boot_check stopped
-              // nothing else would take it down. Full width, so the warning
-              // is not squeezed into half a chain.
-              id(boot_qr_cycle).execute(0, false);
-              id(boot_view).execute(false, false);
-              id(boot_set_lines).execute("Keep holding", "to reset", "Wi-Fi", "", true);
+          const int stage = held >= 30000 ? 5 : held >= 20000 ? 4 : held >= 10000 ? 3 : 2;
+          // Whole seconds left in this stage, so the countdown reads 10..1.
+          const uint32_t stage_end = stage == 2 ? 10000 : stage == 3 ? 20000 : 30000;
+          const unsigned left = stage == 5 ? 0 : (unsigned) ((stage_end - held + 999) / 1000);
+          static int shown = -1;
+          if (id(boot_hold_stage) < 2) {
+            shown = -1;
+            // component.suspend maps to stop_poller() on a PollingComponent;
+            // there is no suspend() method to call from a lambda.
+            id(boot_anim).stop_poller();
+            // boot_check repaints the overlay twice a second. On a panel
+            // whose overlay is still up (first boot, or the 45s setup hint)
+            // it would overwrite this warning as fast as we draw it. It is
+            // not resumed on release: boot_show_address ends in boot_hide,
+            // which suspends it anyway, so this is where it would land. The
+            // exception is an outage, where boot_hide resumes it instead of
+            // hiding, which is what keeps the Wi-Fi lost lines coming back.
+            id(boot_check).stop_poller();
+            // The QR would cover the warning, and with boot_check stopped
+            // nothing else would take it down. Full width, so the warning
+            // is not squeezed into half a chain.
+            id(boot_qr_cycle).execute(0, false);
+            id(boot_view).execute(false, false);
+          }
+          if (stage != id(boot_hold_stage)) {
+            static const char *const LOG[] = {"keep holding for a Wi-Fi reset", "release to reset Wi-Fi",
+                                              "release to factory reset", "release to cancel"};
+            ESP_LOGI("boot", "Button held %us: %s", (unsigned) (held / 1000), LOG[stage - 2]);
+            id(boot_hold_stage) = stage;
+          }
+          // Lines only when the stage or the count changes; the bar every tick.
+          const int key = stage * 100 + (int) left;
+          if (key != shown) {
+            shown = key;
+            char n[16];
+            if (stage == 2) {
+              snprintf(n, sizeof(n), "in %us", left);
+              id(boot_set_lines).execute("Keep holding", "Wi-Fi reset", n, "", true);
+            } else if (stage == 3) {
+              snprintf(n, sizeof(n), "Hold %us to", left);
+              id(boot_set_lines).execute("Release to", "reset Wi-Fi", n, "erase all", false);
+            } else if (stage == 4) {
+              snprintf(n, sizeof(n), "Hold %us to", left);
+              id(boot_set_lines).execute("Release to", "erase all", n, "cancel", false);
+            } else {
+              id(boot_set_lines).execute("Release to", "cancel", "", "", false);
             }
+          }
+          if (stage == 2) {
             int pct = (int) ((held - 5000) / 50);  // 5000ms span -> 0..100
             if (pct > 100) pct = 100;
             lv_bar_set_value(id(boot_bar), pct, LV_ANIM_OFF);
-            return;
-          }
-          if (held >= 1500 && id(boot_hold_stage) < 1) {
-            id(boot_hold_stage) = 1;
-            id(boot_show_address).execute();
           }
 
   # Wi-Fi went away. Undo boot_hide, cancel any pending hide, and say what
@@ -543,9 +726,9 @@ script:
       - lambda: |-
           id(boot_ip_shown_ms) = 0;
           id(boot_hold_since_ms) = 0;
-      # Stage 2 is the "keep holding to reset Wi-Fi" warning, which owns both
-      # the lines and the bar and stopped boot_check for exactly this reason.
-      # Do not repaint over a warning that is about to erase the network.
+      # Stages 2 and up are the boot button's countdown, which owns both the
+      # lines and the bar and stopped boot_check for exactly this reason. Do
+      # not repaint over a screen that says what letting go will erase.
       # boot_refresh derives these same lines when it next runs.
       - if:
           condition:
@@ -564,6 +747,43 @@ script:
                 id(boot_qr_cycle).execute(0, false);
                 id(boot_view).execute(wide, wide);
                 id(boot_set_lines).execute("Wi-Fi", "lost", "open app", "", true);
+
+  # A panel nobody has picked a team on (no_team_default in the gameday
+  # component) shows the app's QR code for one turn every 3 minutes, the
+  # fresh panel's 13 s of QR, until a team is picked. Only over the board:
+  # not while the overlay is up for anything else, during QC, or with the
+  # boot button in use.
+  - id: boot_app_qr_turn
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: |-
+              auto *w = wifi::global_wifi_component;
+              return w != nullptr && w->is_connected() && id(gameday_ctl).app_qr_turns() &&
+                     id(gameday_ctl).board_ready() && !id(qc_active) &&
+                     lv_obj_has_flag(id(boot_overlay), LV_OBJ_FLAG_HIDDEN) && id(boot_hold_since_ms) == 0 &&
+                     id(boot_button_press_ms) == 0 && !id(boot_show_address).is_running();
+          then:
+            - lambda: |-
+                id(boot_app_qr_on) = true;
+                ESP_LOGI("boot", "No team yet: the app's QR code takes a turn");
+            - component.resume: boot_check
+            - script.execute:
+                id: boot_refresh
+                via_button: false
+            - lvgl.obj.update:
+                id: boot_overlay
+                hidden: false
+            - delay: 13s
+            - lambda: 'id(boot_app_qr_on) = false;'
+            # The boot button may have taken the overlay meanwhile; it hides
+            # it itself.
+            - if:
+                condition:
+                  lambda: 'return id(boot_hold_stage) == 0 && !id(boot_show_address).is_running();'
+                then:
+                  - script.execute: boot_hide
 
   # A mesh system moving the panel to another access point drops Wi-Fi for a
   # few seconds. Wait that long before covering the score, so a drop that
@@ -598,8 +818,12 @@ interval:
     id: boot_hold_check
     then:
       - script.execute: boot_hold_tick
+  - interval: 3min
+    startup_delay: 3min
+    then:
+      - script.execute: boot_app_qr_turn
 
-# Bluetooth setup (esp32_improv, configured in gameday-common.yaml) starts
+# Bluetooth setup (improv_ble, configured in gameday-common.yaml) starts
 # advertising about a second after a boot with no saved network, and the
 # Game Day app finds the panel over Bluetooth rather than someone joining the
 # AP hotspot by hand. Say so on the overlay instead of leaving it on
@@ -607,7 +831,7 @@ interval:
 # waits. boot_check keeps polling the whole time, so once WiFi actually
 # connects it overwrites these lines with the normal app-hint/Ready flow on
 # its own; on_stop needs no action here for that reason.
-esp32_improv:
+improv_ble:
   on_start:
     # The overlay may already be hidden and boot_check/boot_anim suspended
     # (a panel that already had a team, or a fallback AP coming up mid-run
@@ -630,8 +854,8 @@ esp32_improv:
         id(boot_qr_cycle).execute(0, false);
         id(boot_view).execute(false, false);
         // Name the network the app just handed over, so a wrong pick shows here.
-        const auto joining = wifi::global_wifi_component->get_sta().get_ssid();
-        id(boot_set_lines).execute("JOINING", joining.empty() ? std::string("Wi-Fi") : joining.str(), "", "", true);
+        const std::string joining = wifi::global_wifi_component->get_sta().get_ssid().str();
+        id(boot_set_lines).execute("JOINING", joining.empty() ? std::string("Wi-Fi") : joining, "", "", true);
   on_provisioned:
     # Credentials worked; nudge boot_check's 500ms poll now instead of
     # waiting up to half a second for it to notice and repaint the
@@ -640,23 +864,39 @@ esp32_improv:
         id: boot_refresh
         via_button: false
 
-# Boot button: the hold is timed from the press so the panel can warn before
-# it erases anything. 1.5s shows the address, 5s starts the "keep holding"
-# warning with a filling bar, 10s resets Wi-Fi. Releasing before 10s leaves
-# the address up for 20s as before and resets nothing.
+# Boot button: the hold is timed from the press (boot_hold_tick) and the
+# release does what the screen said. Let go at 10 to 20 s to reset Wi-Fi, at
+# 20 to 30 s for a factory reset. Letting go any other time leaves the
+# address up for 20 s and resets nothing.
 binary_sensor:
   - id: !extend power_button
     on_press:
       - lambda: |-
+          if (id(boot_hold_stage) == 6) return;
           id(boot_button_press_ms) = millis() == 0 ? 1 : millis();
           id(boot_hold_stage) = 0;
     on_release:
       - lambda: |-
-          const bool warned = id(boot_hold_stage) == 2;
+          const int stage = id(boot_hold_stage);
           id(boot_button_press_ms) = 0;
+          if (stage == 6) return;
+          if (stage == 3 || stage == 4) {
+            id(boot_hold_stage) = 6;
+            if (stage == 3) {
+              ESP_LOGI("boot", "Button released: resetting Wi-Fi");
+              id(boot_set_lines).execute("Wi-Fi reset", "restarting", "", "", false);
+              id(reset_wifi).press();
+            } else {
+              ESP_LOGI("boot", "Button released: factory reset");
+              id(boot_set_lines).execute("Erasing all", "restarting", "", "", false);
+              id(factory_reset_btn).press();
+            }
+            return;
+          }
           id(boot_hold_stage) = 0;
-          if (warned) {
+          if (stage == 2 || stage == 5) {
             // Back out of the warning: restore the address screen and its bar.
+            ESP_LOGI("boot", "Button released: nothing reset");
             id(boot_anim).start_poller();
             id(boot_show_address).execute();
           }
@@ -742,7 +982,7 @@ lvgl:
             - bar:
                 id: boot_bar
                 x: 8
-                y: 60
+                y: 61
                 width: 112
                 height: 3
                 min_value: 0
@@ -793,7 +1033,7 @@ lvgl:
                       size: 64
                       light_color: 0xA0A0A0
                       dark_color: 0x000000
-                      text: "https://gamedayscoreboard.app/setup"
+                      text: "https://app.gameday-scoreboard.com/setup"
 
 esphome:
   on_boot:

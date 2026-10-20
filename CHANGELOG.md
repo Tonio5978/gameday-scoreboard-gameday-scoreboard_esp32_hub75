@@ -8,6 +8,80 @@ matching section fails the build.
 Format: `## vX.Y.Z` heading, then short bullets written for the person who
 owns the panel, not for the code.
 
+Changes merged since the last release go under `## Unreleased` at the top.
+The release renames that heading to the new version. A released section
+stays as it shipped: a change to something it describes is a new bullet
+under `## Unreleased`.
+
+The site renders this file to gamedayscoreboard.app/changelog, newest first,
+with a one-line summary for each release: the first sentence of the first
+bullet, or a plain line between the heading and the bullets when a release
+needs a better one. Panels link to their release's section there. Neither
+the site nor the docs' What's new page shows `## Unreleased`.
+
+## Unreleased
+
+- The installer and the updates moved to install.gameday-scoreboard.com, and the setup page to app.gameday-scoreboard.com/setup, which the QR code on the panel opens. One installer now covers the Game Day Scoreboard controller and any board on the MoonHub75 pinout: pick one panel or two, then click Install. After the install, give it a few more seconds and the same window asks for your WiFi. The early test controllers on the scoreboard75 pinout have their own installer, linked from the main page.
+- A panel that runs hot, in a sunny window or a closed cabinet, dims itself a step at a time instead of cooking. A small thermometer pulses slowly in its top right corner, and every two minutes the bottom line says "Too warm, dimming". It goes back to your brightness as it cools. The device page says so too, and shows the chip temperature under Diagnostics. Home Assistant gets a Chip Temperature sensor.
+- A panel that restarts twice in a row because its power dipped, as on a phone charger or a power supply too weak for it, keeps its brightness low so it stays on. A small plug pulses slowly in its top right corner, and every two minutes the bottom line says "Check power supply", until you press Clear on the device page.
+- The Device card on the device page has a Diagnostics section: why the panel last restarted and when (power on, restart, update, crash, froze or a power dip), any crash, freeze or power dip since it was plugged in, free memory, the Wi-Fi signal, the last read from ESPN and the firmware version and build. If the panel restarted on its own, this says why. Under Signal it draws the last day of Wi-Fi signal, says when the signal is weak, and counts Wi-Fi drops with the cause of the last one.
+- After a power cut the panel waits for your router instead of asking you to fix the Wi-Fi. A panel that hasn't found its network 30 seconds after starting says "Waiting for" the network and "Just had a power cut? Routers take a few min", and only shows "Wi-Fi lost" with the app QR code after 3 minutes.
+- Reset Wi-Fi keeps the saved networks. The panel restarts into setup for 15 minutes so you can give it a new network; unplug it, or let the 15 minutes run out, and it goes back to the networks it already knows. The setup screen takes a turn saying "Unplug it to rejoin saved Wi-Fi". Factory Reset still erases everything.
+- The button on the controller resets Wi-Fi or the whole panel without the app or the device page, and nothing happens until you let go. Hold it: at 5 seconds the screen starts counting down, at 10 it says "Release to reset Wi-Fi", at 20 "Release to erase all" for a factory reset, and at 30 "Release to cancel". Before, a 10 second hold reset Wi-Fi while you were still holding it, and there was no factory reset on the button. Holding the button on a panel that's switched off turns it on, so you can see the countdown.
+- On a network that blocks time servers (some guest, office and school Wi-Fi), the panel now sets its clock from ESPN a few seconds after joining and shows today's games, instead of saying "Getting ready" all day. It switches to a time server's clock as soon as one answers.
+- On a bar, hotel or dorm Wi-Fi that joins and then wants you to sign in on a web page, the panel says "Wi-Fi needs sign-in, use home or a hotspot" with the QR code for the app, instead of "Can't reach ESPN" forever. The panel can't sign in to those pages, so set it up on a home network or a phone hotspot. The device page says the same, and the message goes away by itself once scores come through.
+- When the panel can't reach ESPN, the device page now says the same as the panel, and its Up next list says "Not checked yet" for a favorite the panel hasn't read yet, keeping "No game scheduled" for when ESPN says there is none.
+- In Live games, a change to the leagues, or to the favorites they follow, takes effect right away instead of leaving the old leagues' final scores up until the next check.
+- When an update crashes as it starts and the panel goes back to the firmware it had, the device page says the update didn't take and which version the panel went back to.
+- Home Assistant: new Game Live, Team Score and Opponent Score entities follow the game in Game Status, and the panel fires an `esphome.gameday_score` event on every score in that game and `esphome.gameday_final` when it ends, in every sport, so an automation can flash the lights when your team scores.
+- The device page's link to an update's release notes opens that release on gamedayscoreboard.app/changelog.
+- Accented letters in names, like the é in Atlético or the ñ in Peña, show in the ticker and the panel's other small text instead of a gap ("Atl tico").
+- At halftime and the final the board takes turns with the line score: each team's points by quarter, period or inning and the total, with runs, hits and errors in baseball. On a 64x64 panel it's a shorter form, by half in football and basketball. With Last play on, the halftime and final ticker also lists the scoring plays the panel saw, like "Q1 7:12 Lamb 12 yd pass, DAL 7-0", and the final adds ESPN's headline for the game.
+
+## v2026.10.0
+
+- Pick a team from MLB, the NBA, the WNBA, men's college basketball, the NHL, MLS or the Premier League on the device page, and the panel follows it the way it follows football.
+- Baseball shows the inning, the count, outs and the runners on a small diamond. Hockey and basketball show the period and clock, and the playoff series when there is one. Soccer shows the minute, stoppage time, the latest goal and red cards, and follows Premier League clubs into the Champions League, Europa League and Conference League and MLS clubs into the CONCACAF Champions Cup.
+- Baseball celebrates runs and home runs, and hockey and soccer celebrate goals. Basketball only celebrates the win, since a basket every few seconds would keep the screen covered.
+- Favorites hold up to 16 teams from any league, in priority order. Turn on "Only today's games" to cycle through just the favorites playing today; a new panel starts with it on. Buttons 1 to 4 on a WizMote still jump to the first four.
+- Live games replaces Live NFL, Live college and Live anything. Pick the leagues on the device page. A panel set to one of the old live modes keeps working.
+- Live games and the On now list on the device page include every Division I men's basketball game, not only the Top 25.
+- Until you pick leagues, Live games follows the leagues of your team and favorites, and the device page now says so. After you pick by hand, "Back to automatic" returns to that. When nothing is live, the page says whether the panel is showing your team or recent final scores until a game starts.
+- When two favorites play at once, a new panel alternates between them. A panel that was already set up keeps showing the higher one.
+- The ticker switches on the device page have names that fit every sport, with a line under each saying what it shows. "Down and distance" is now "Game situation".
+- Jacksonville State is JXST, ESPN's current abbreviation, in the device page's team picker and on the panel while it loads a newly picked team. It was JVST. A panel already following them keeps its team.
+- Football works the same as before.
+- New "Install updates automatically" switch on the device page and in Home Assistant, off unless you turn it on. With it on, the panel installs a new release between 3 and 5 AM, never during a live game it is showing.
+- If an update crashes as it starts and the panel goes back to the firmware it had, the panel remembers that version and doesn't install it on its own again, so it no longer restarts into the same bad update every night. A later release still installs, and Install on the device page still tries it by hand.
+- A panel nobody has picked a team for no longer quietly follows Dallas. It shows live games, and when nothing is on, the latest final scores and when the next game starts. A panel in My team or Favorites with Dallas picked keeps it. Until you pick a team, the app QR code comes back for 13 seconds every 3 minutes.
+- When nothing is live on a panel with no team picked, the board shows the games still to come today under "Later today", each with both logos, the start time and the TV channel, and then the latest final scores for every league it follows, not only football ("Yesterday's NHL scores"). A game drops off the list once it starts.
+- When no game is left today, the "Next" card names the matchup as well as the time, like "Next: BOS at NYR Thu 6:00 PM".
+- Between seasons the board shows a clock in your team's colors instead of "No upcoming game" or "No live games" for months. Under the time is the next game once it's on the schedule, like "Next: at PHI Mar 26 7:05 PM" (in the ticker on a single 64x64 panel), or else the date. Outside football, the clock comes up once the next game is more than 10 days away, so a football bye week never shows it. A panel with no team picked shows the clock in gray.
+- The ticker's "Game situation" switch is now one switch per sport: "Down and distance" for football, "Count and at-bat" for baseball and "Match stats" for soccer. The device page shows only the ones for sports your panel follows, so turning off football's line no longer turns off the baseball count. After the update all three start where your old switch was.
+- When it starts up and joins Wi-Fi, every panel shows the QR code for the Game Day app, then its address, then your game. Turn off "Show how to connect when the panel starts" to go straight to the game.
+- After you set up Wi-Fi, the panel sets its clock within a second or two instead of up to a few minutes, and says "Getting ready" until then instead of "No upcoming game".
+- A panel that cannot reach ESPN says "Can't reach ESPN" instead of "No upcoming game", after a restart and after a team change. Favorites no longer sits on a blank board while reads fail.
+- A panel that can't get back on Wi-Fi restarts itself after a minute instead of ten, and never while you are setting it up from the app. If the app hands it a wrong password during an outage, it goes back to the network it had.
+- The panel remembers up to five Wi-Fi networks. Set it up on a phone hotspot for a tailgate or a bar and it still knows your home network when it gets back; it joins whichever saved network it can see, trying the last one that worked first. The device page lists them and can forget one. Reset Wi-Fi and Factory Reset still clear them all.
+- Each panel's setup hotspot has its own name, like "Game Day 2f6a70", shown on the panel's setup screen, so two panels in one house are easy to tell apart.
+- Long Wi-Fi names, and names with a curly apostrophe like an iPhone hotspot's, show correctly while the panel joins. Accented letters in names show too, instead of a box.
+- A postponed, canceled or suspended game no longer shows as Final, and a suspended game no longer gets a WINS splash.
+- A game whose kickoff time isn't set yet, like a college game two weeks out, shows "Sat TBD" instead of a made-up time like "Fri 11:00 PM", and the panel finds that game's scoreboard on the right day.
+- Bowl and playoff games show their name, like "Rose Bowl" or "NFC Wild Card", at the start of the pre-game ticker and under the score on the device page.
+- After you change teams, both logos are there when the scoreboard shows up, instead of popping in one at a time.
+- The demo build's made-up teams show each team's abbreviation on a badge in its colors where a logo would be, the same badge the app shows, so the demo never fetches a logo.
+- The device page works better with a screen reader. Switches say whether they are on or off, the brightness and speed sliders, menus and team search have names, and the mode, league and picker tab buttons say which one is chosen.
+- Live modes use much less data when nothing is on: the panel waits for the next kickoff instead of checking every 2 minutes. During a game it checks every 10 seconds, as often as ESPN updates, and when ESPN has trouble it waits longer between tries.
+- Home Assistant: Game Status changes when a game starts, scores or ends instead of every few seconds, and the free memory sensors read every 5 minutes instead of every 30 seconds and are off on a newly added panel, so your history grows much more slowly.
+- On the device page, quick taps on modes, leagues, favorites and switches no longer leave the page showing something the panel didn't save. In Favorite teams with no game ahead, the page says "None of your favorites has a game coming up".
+- When the panel stops answering, the device page dims the board and says "Panel not answering since 9:41 PM" instead of only turning the dot grey. Reboot says the panel is restarting and the page reconnects on its own when it's back. Reset Wi-Fi and Factory reset say the panel is restarting into setup, where this page can't follow it.
+- The device page's panel picker names the panel we ship: "One 128x64 panel", or two 64x64 side by side. Before, you had to pick "Two panels wide" for one panel.
+- Built your own? The DIY installer at gamedayscoreboard.app asks whether you have one 64x64 panel or a 128x64 (or two 64x64 side by side) and installs the matching firmware, so a two-panel build starts on the whole board.
+- The hidden demo (do=demo) is gone from the regular firmware.
+- During a game the panel asks ESPN for just that game instead of the whole day's scoreboard, about a tenth of the data it downloaded before. The device page shows how much the panel has pulled from ESPN since it started, for anyone on a capped plan.
+- The device page's header shows a GD mark instead of a football. The lines under the Live games and Favorite teams bars now name the settings that decide the behavior: Switch every, the favorites' slot order, and Alternate.
+- A team logo that will not download is asked for less and less often, instead of every 15 seconds, and a logo that ESPN refuses waits much longer. The score keeps updating as before, and the logo shows up once a request goes through.
+
 ## v1.5.5
 
 - Switching games no longer freezes the panel.
